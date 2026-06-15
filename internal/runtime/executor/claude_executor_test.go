@@ -2189,6 +2189,72 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 	}
 }
 
+func TestRemapOAuthToolNames_DynamicSnakeCaseFallback(t *testing.T) {
+	body := []byte(`{"tools":[` +
+		`{"name":"skills_list","input_schema":{"type":"object","properties":{}}},` +
+		`{"name":"skill_manage","input_schema":{"type":"object","properties":{}}}` +
+		`],"tool_choice":{"type":"tool","name":"skills_list"},"messages":[{"role":"assistant","content":[` +
+		`{"type":"tool_use","id":"toolu_01","name":"skill_manage","input":{}},` +
+		`{"type":"tool_reference","tool_name":"skills_list"}` +
+		`]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "SkillsList" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "SkillsList")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "SkillManage" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "SkillManage")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "SkillsList" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "SkillsList")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "SkillManage" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "SkillManage")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "SkillsList" {
+		t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, "SkillsList")
+	}
+	if reverseMap["SkillsList"] != "skills_list" || reverseMap["SkillManage"] != "skill_manage" {
+		t.Fatalf("reverseMap = %v, want dynamic entries", reverseMap)
+	}
+
+	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"SkillsList","input":{}}]}`)
+	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "skills_list" {
+		t.Fatalf("content.0.name = %q, want %q", got, "skills_list")
+	}
+}
+
+func TestRemapOAuthToolNames_DynamicFallbackSkipsMCPDoubleUnderscore(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"mcp__cloudflare-docs__search_cloudflare_documentation","input_schema":{"type":"object","properties":{}}}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if len(reverseMap) != 0 {
+		t.Fatalf("reverseMap = %v, want empty", reverseMap)
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "mcp__cloudflare-docs__search_cloudflare_documentation" {
+		t.Fatalf("tools.0.name = %q, want unchanged MCP double-underscore name", got)
+	}
+}
+
+func TestRemapOAuthToolNames_DynamicFallbackRemapsSingleUnderscoreMCPNames(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"mcp_cloudflare_docs_search_cloudflare_documentation","input_schema":{"type":"object","properties":{}}}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "McpCloudflareDocsSearchCloudflareDocumentation" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "McpCloudflareDocsSearchCloudflareDocumentation")
+	}
+	if reverseMap["McpCloudflareDocsSearchCloudflareDocumentation"] != "mcp_cloudflare_docs_search_cloudflare_documentation" {
+		t.Fatalf("reverseMap = %v, want single-underscore MCP entry", reverseMap)
+	}
+
+	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"McpCloudflareDocsSearchCloudflareDocumentation","input":{}}]}`)
+	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "mcp_cloudflare_docs_search_cloudflare_documentation" {
+		t.Fatalf("content.0.name = %q, want %q", got, "mcp_cloudflare_docs_search_cloudflare_documentation")
+	}
+}
+
 // TestRemapOAuthToolNames_MixedCase_OnlyRenamedToolsReversed is the regression
 // test for a case where a single request contains both a TitleCase tool (which
 // must pass through unchanged) and a lowercase tool that we forward-rename.

@@ -187,6 +187,10 @@ func (b *Builder) Build() (*Service, error) {
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
 	}
+	b.cfg.NormalizePluginsConfig()
+	if errResolvePluginsDir := b.cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && b.cfg.Plugins.Enabled {
+		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
+	}
 
 	tokenProvider := b.tokenProvider
 	if tokenProvider == nil {
@@ -289,8 +293,8 @@ func (b *Builder) Build() (*Service, error) {
 	service.serverOptions = append(service.serverOptions,
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
-		api.WithConfigReloadHook(func(ctx context.Context, cfg *config.Config) {
-			service.applyConfigUpdate(cfg)
+		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
+			service.reloadConfigFromWatcher()
 		}),
 	)
 	return service, nil

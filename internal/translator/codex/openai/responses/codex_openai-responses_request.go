@@ -1,8 +1,9 @@
 package responses
 
 import (
-	"fmt"
+	"encoding/json"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -71,46 +72,80 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 		return rawJSON
 	}
 
-	inputArray := inputResult.Array()
-	result := rawJSON
-
-	// Directly modify role values for items with "system" role
-	for i := 0; i < len(inputArray); i++ {
-		rolePath := fmt.Sprintf("input.%d.role", i)
-		if gjson.GetBytes(result, rolePath).String() == "system" {
-			result, _ = sjson.SetBytes(result, rolePath, "developer")
-		}
+	inputItems := inputResult.Array()
+	if len(inputItems) == 0 {
+		return rawJSON
 	}
 
-	return result
+	changed := false
+	rebuiltInput := make([]json.RawMessage, 0, len(inputItems))
+	for _, item := range inputItems {
+		itemRaw := []byte(item.Raw)
+		if item.IsObject() && item.Get("role").String() == "system" {
+			updatedItem, errSetItem := sjson.SetRawBytes(itemRaw, "role", []byte(`"developer"`))
+			if errSetItem != nil {
+				return rawJSON
+			}
+			itemRaw = updatedItem
+			changed = true
+		}
+		rebuiltInput = append(rebuiltInput, json.RawMessage(itemRaw))
+	}
+	if !changed {
+		return rawJSON
+	}
+
+	inputRaw, errMarshalInput := json.Marshal(rebuiltInput)
+	if errMarshalInput != nil {
+		return rawJSON
+	}
+	updated, errSetInput := sjson.SetRawBytes(rawJSON, "input", inputRaw)
+	if errSetInput != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 // normalizeCodexBuiltinTools rewrites legacy/preview built-in tool variants to the
 // stable names expected by the current Codex upstream.
 func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
-	result := rawJSON
-
-	tools := gjson.GetBytes(result, "tools")
-	if tools.IsArray() {
-		toolArray := tools.Array()
-		for i := 0; i < len(toolArray); i++ {
-			typePath := fmt.Sprintf("tools.%d.type", i)
-			result = normalizeCodexBuiltinToolAtPath(result, typePath)
-		}
-	}
-
+	result := normalizeCodexBuiltinToolArray(rawJSON, "tools")
 	result = normalizeCodexBuiltinToolAtPath(result, "tool_choice.type")
+	return normalizeCodexBuiltinToolArray(result, "tool_choice.tools")
+}
 
-	toolChoiceTools := gjson.GetBytes(result, "tool_choice.tools")
-	if toolChoiceTools.IsArray() {
-		toolArray := toolChoiceTools.Array()
-		for i := 0; i < len(toolArray); i++ {
-			typePath := fmt.Sprintf("tool_choice.tools.%d.type", i)
-			result = normalizeCodexBuiltinToolAtPath(result, typePath)
-		}
+func normalizeCodexBuiltinToolArray(rawJSON []byte, path string) []byte {
+	tools := gjson.GetBytes(rawJSON, path)
+	if !tools.IsArray() {
+		return rawJSON
 	}
 
-	return result
+	changed := false
+	var toolItems [][]byte
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		item := []byte(tool.Raw)
+		currentType := tool.Get("type").String()
+		normalizedType := normalizeCodexBuiltinToolType(currentType)
+		if normalizedType != "" {
+			updated, errSetType := sjson.SetBytes(item, "type", normalizedType)
+			if errSetType == nil {
+				item = updated
+				changed = true
+				log.Debugf("codex responses: normalized builtin tool type at %s.%d.type from %q to %q", path, len(toolItems), currentType, normalizedType)
+			}
+		}
+		toolItems = append(toolItems, item)
+		return true
+	})
+	if !changed {
+		return rawJSON
+	}
+
+	updated, errSetTools := sjson.SetRawBytes(rawJSON, path, translatorcommon.JoinRawArray(toolItems))
+	if errSetTools != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 func normalizeCodexBuiltinToolAtPath(rawJSON []byte, path string) []byte {

@@ -1000,15 +1000,10 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 			if _, exists := forwardMap[name]; exists {
 				return true
 			}
-			for attempt := uint32(0); ; attempt++ {
-				alias := helps.ClaudeMCPToolAlias(mcpAliases.secret, name, attempt)
-				if reservedNames[alias] {
-					continue
-				}
-				forwardMap[name] = alias
-				reservedNames[alias] = true
-				break
-			}
+			// FORK PATCH: prefer an official Claude Code tool name, falling
+			// back to the upstream MCP alias. See
+			// claude_executor_cloaking_official.go.
+			assignClaudeToolAlias(mcpAliases.secret, name, reservedNames, forwardMap)
 			return true
 		})
 	}
@@ -1254,15 +1249,10 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 			if _, exists := forwardMap[name]; exists {
 				return true
 			}
-			for attempt := uint32(0); ; attempt++ {
-				alias := helps.ClaudeMCPToolAlias(mcpAliases.secret, name, attempt)
-				if reservedNames[alias] {
-					continue
-				}
-				forwardMap[name] = alias
-				reservedNames[alias] = true
-				break
-			}
+			// FORK PATCH: prefer an official Claude Code tool name, falling
+			// back to the upstream MCP alias. See
+			// claude_executor_cloaking_official.go.
+			assignClaudeToolAlias(mcpAliases.secret, name, reservedNames, forwardMap)
 			return true
 		})
 	}

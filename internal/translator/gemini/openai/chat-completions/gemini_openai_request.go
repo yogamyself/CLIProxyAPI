@@ -48,10 +48,8 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			thinkingPath := "generationConfig.thinkingConfig"
 			if effort == "auto" {
 				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingBudget", -1)
-				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", true)
 			} else {
 				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingLevel", effort)
-				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", effort != "none")
 			}
 		}
 	}
@@ -80,6 +78,9 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			out, _ = sjson.SetBytes(out, "generationConfig.candidateCount", val)
 		}
 	}
+
+	// Map OpenAI response_format to Gemini structured output settings.
+	out = applyOpenAIResponseFormatToGemini(out, rawJSON)
 
 	// Map OpenAI modalities -> Gemini generationConfig.responseModalities
 	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
@@ -350,13 +351,22 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						fnRaw = string(fnRawBytes)
 					}
 					fnRawBytes := []byte(fnRaw)
-					fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", util.SanitizeFunctionName(fn.Get("name").String()))
-					fnRaw = string(fnRawBytes)
-					if parameters := gjson.Get(fnRaw, "parametersJsonSchema"); parameters.Exists() {
-						fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema", util.CleanJSONSchemaForGemini(parameters.Raw))
+					nameResult := fn.Get("name")
+					originalName := nameResult.String()
+					sanitizedName := util.SanitizeFunctionName(originalName)
+					if nameResult.Type != gjson.String || sanitizedName != originalName {
+						fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", sanitizedName)
 					}
-					fnRaw, _ = sjson.Delete(fnRaw, "strict")
-					functionDeclarations = append(functionDeclarations, []byte(fnRaw))
+					if parameters := gjson.GetBytes(fnRawBytes, "parametersJsonSchema"); parameters.Exists() {
+						cleanedParameters := util.CleanJSONSchemaForGemini(parameters.Raw)
+						if cleanedParameters != parameters.Raw {
+							fnRawBytes, _ = sjson.SetRawBytes(fnRawBytes, "parametersJsonSchema", []byte(cleanedParameters))
+						}
+					}
+					if gjson.GetBytes(fnRawBytes, "strict").Exists() {
+						fnRawBytes, _ = sjson.DeleteBytes(fnRawBytes, "strict")
+					}
+					functionDeclarations = append(functionDeclarations, fnRawBytes)
 				}
 			}
 			if gs := t.Get("google_search"); gs.Exists() {
@@ -467,4 +477,26 @@ func openAIInputAudioMimeType(audioFormat string) string {
 	default:
 		return "audio/" + audioFormat
 	}
+}
+
+// applyOpenAIResponseFormatToGemini maps OpenAI Chat Completions structured output settings to Gemini.
+// Response schemas pass through unchanged because the tool schema cleaner removes supported response fields.
+func applyOpenAIResponseFormatToGemini(out []byte, rawJSON []byte) []byte {
+	responseFormat := gjson.GetBytes(rawJSON, "response_format")
+	if !responseFormat.Exists() {
+		return out
+	}
+
+	switch strings.ToLower(strings.TrimSpace(responseFormat.Get("type").String())) {
+	case "json_object":
+		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+	case "json_schema":
+		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+		out, _ = sjson.DeleteBytes(out, "generationConfig.responseSchema")
+		if schema := responseFormat.Get("json_schema.schema"); schema.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generationConfig.responseJsonSchema", []byte(schema.Raw))
+		}
+	}
+
+	return out
 }

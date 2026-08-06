@@ -155,17 +155,11 @@ func interactionsCodexReasoningSummary(cfg gjson.Result) string {
 		"thinkingSummaries",
 		"reasoning.summary",
 	} {
-		if value := cfg.Get(path); value.Exists() {
-			switch value.Type {
-			case gjson.True:
-				return "auto"
-			case gjson.False:
-				return "none"
-			case gjson.String:
-				summary := strings.ToLower(strings.TrimSpace(value.String()))
-				if summary != "" {
-					return summary
-				}
+		if value := cfg.Get(path); value.Type == gjson.String {
+			summary := strings.ToLower(strings.TrimSpace(value.String()))
+			switch summary {
+			case "auto", "none":
+				return summary
 			}
 		}
 	}
@@ -177,10 +171,10 @@ func interactionsCodexReasoningSummary(cfg gjson.Result) string {
 		"thinkingConfig.include_thoughts",
 		"thinkingConfig.includeThoughts",
 	} {
-		if value := cfg.Get(path); value.Exists() {
-			if value.Bool() {
-				return "auto"
-			}
+		switch value := cfg.Get(path); value.Type {
+		case gjson.True:
+			return "auto"
+		case gjson.False:
 			return "none"
 		}
 	}
@@ -348,17 +342,32 @@ func copyInteractionsToolsToCodex(out []byte, root gjson.Result) []byte {
 
 func copyInteractionsCodexTopLevel(out []byte, root gjson.Result) []byte {
 	if serviceTier := normalizeInteractionsCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
-		out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+		current := gjson.GetBytes(out, "service_tier")
+		if current.Type != gjson.String || current.String() != serviceTier {
+			out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+		}
 	}
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		out = setInteractionsCodexRawIfDifferent(out, "tool_choice", toolChoice)
 	}
 	for _, path := range []string{"parallel_tool_calls", "store", "metadata", "include", "truncation"} {
 		if value := root.Get(path); value.Exists() {
-			out, _ = sjson.SetRawBytes(out, path, []byte(value.Raw))
+			out = setInteractionsCodexRawIfDifferent(out, path, value)
 		}
 	}
 	return out
+}
+
+func setInteractionsCodexRawIfDifferent(out []byte, path string, value gjson.Result) []byte {
+	current := gjson.GetBytes(out, path)
+	if current.Exists() && current.Raw == value.Raw {
+		return out
+	}
+	updated, errSet := sjson.SetRawBytes(out, path, []byte(value.Raw))
+	if errSet != nil {
+		return out
+	}
+	return updated
 }
 
 func appendInteractionsThoughtToCodex(items *[][]byte, step gjson.Result) {
@@ -565,8 +574,12 @@ func codexToolFromDeclaration(declaration gjson.Result) map[string]any {
 
 func cleanedCodexToolParameters(params gjson.Result) json.RawMessage {
 	cleaned := []byte(params.Raw)
-	cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-	cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+	if params.Get("$schema").Exists() {
+		cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
+	}
+	if params.Get("additionalProperties").Type != gjson.False {
+		cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+	}
 	return json.RawMessage(cleaned)
 }
 

@@ -26,7 +26,7 @@ import (
 // The function performs the following transformations:
 // 1. Sets up a template with the model name and empty instructions field
 // 2. Processes system messages and converts them to developer input content
-// 3. Transforms message contents (text, image, tool_use, tool_result) to appropriate formats
+// 3. Transforms message contents (text, image, document, tool_use, tool_result) to appropriate formats
 // 4. Converts tools declarations to the expected format
 // 5. Adds additional configuration parameters for the Codex API
 // 6. Maps Claude thinking configuration to Codex reasoning settings
@@ -129,6 +129,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				contentItems = append(contentItems, content)
 			}
 
+			appendDocumentContent := func(dataURL string) {
+				content := []byte(`{"type":"input_file","file_data":"","filename":"document.pdf"}`)
+				content, _ = sjson.SetBytes(content, "file_data", dataURL)
+				contentItems = append(contentItems, content)
+			}
+
 			appendReasoningContent := func(part gjson.Result) {
 				if messageRole != "assistant" {
 					return
@@ -181,6 +187,22 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
 								appendImageContent(dataURL)
 							}
+						}
+					case "document":
+						sourceResult := messageContentResult.Get("source")
+						if sourceResult.Get("type").String() != "base64" {
+							continue
+						}
+						mediaType := strings.TrimSpace(sourceResult.Get("media_type").String())
+						if !strings.EqualFold(mediaType, "application/pdf") {
+							continue
+						}
+						data := sourceResult.Get("data").String()
+						if data == "" {
+							data = sourceResult.Get("base64").String()
+						}
+						if data != "" {
+							appendDocumentContent(fmt.Sprintf("data:%s;base64,%s", mediaType, data))
 						}
 					case "tool_use":
 						flushMessage()
@@ -273,23 +295,31 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				continue
 			}
 			tool := []byte(toolResult.Raw)
-			tool, _ = sjson.SetBytes(tool, "type", "function")
+			if toolResult.Get("type").Type != gjson.String || toolResult.Get("type").String() != "function" {
+				tool, _ = sjson.SetBytes(tool, "type", "function")
+			}
 			// Apply shortened name if needed
 			if v := toolResult.Get("name"); v.Exists() {
-				name := v.String()
+				originalName := v.String()
+				name := originalName
 				if short, ok := toolNameMap[name]; ok {
 					name = short
 				} else {
 					name = shortenNameIfNeeded(name)
 				}
-				tool, _ = sjson.SetBytes(tool, "name", name)
+				if v.Type != gjson.String || name != originalName {
+					tool, _ = sjson.SetBytes(tool, "name", name)
+				}
 			}
 			tool, _ = sjson.SetRawBytes(tool, "parameters", []byte(normalizeToolParameters(toolResult.Get("input_schema").Raw)))
-			tool, _ = sjson.DeleteBytes(tool, "input_schema")
-			tool, _ = sjson.DeleteBytes(tool, "parameters.$schema")
-			tool, _ = sjson.DeleteBytes(tool, "cache_control")
-			tool, _ = sjson.DeleteBytes(tool, "defer_loading")
-			tool, _ = sjson.SetBytes(tool, "strict", false)
+			for _, path := range []string{"input_schema", "parameters.$schema", "cache_control", "defer_loading"} {
+				if gjson.GetBytes(tool, path).Exists() {
+					tool, _ = sjson.DeleteBytes(tool, path)
+				}
+			}
+			if gjson.GetBytes(tool, "strict").Type != gjson.False {
+				tool, _ = sjson.SetBytes(tool, "strict", false)
+			}
 			toolItems = append(toolItems, tool)
 		}
 	}
@@ -333,7 +363,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		}
 	}
 	template, _ = sjson.SetBytes(template, "reasoning.effort", reasoningEffort)
-	template, _ = sjson.SetBytes(template, "reasoning.summary", "auto")
+	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
+	// reasoning.summary to the source request's canonical summary intent instead
+	// of coupling it to reasoning effort.
 	serviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier"))
 	if speed := rootResult.Get("speed"); speed.Type == gjson.String && speed.String() == "fast" {
 		serviceTier = "priority"
